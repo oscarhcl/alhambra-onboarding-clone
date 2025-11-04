@@ -1,0 +1,799 @@
+# Alhambra Bank & Trust - Secure Infrastructure Isolation
+# Account: 600043382145
+# Separates client-facing services from internal portfolio tracker infrastructure
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Secure infrastructure isolation for Alhambra Bank client services'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+  
+  AccountId:
+    Type: String
+    Default: '600043382145'
+    Description: 'AWS Account ID'
+
+Resources:
+  # ============================================================================
+  # CLIENT-FACING VPC (Isolated from Internal Infrastructure)
+  # ============================================================================
+  
+  ClientVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-vpc-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: 'Client-facing services only'
+
+  # Public subnets for client-facing load balancers
+  ClientPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ClientVPC
+      CidrBlock: 10.1.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-public-1-${Environment}'
+
+  ClientPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ClientVPC
+      CidrBlock: 10.1.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-public-2-${Environment}'
+
+  # Private subnets for Lambda functions and client databases
+  ClientPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ClientVPC
+      CidrBlock: 10.1.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-private-1-${Environment}'
+
+  ClientPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ClientVPC
+      CidrBlock: 10.1.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-private-2-${Environment}'
+
+  # Internet Gateway for client-facing services
+  ClientInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-igw-${Environment}'
+
+  ClientVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ClientVPC
+      InternetGatewayId: !Ref ClientInternetGateway
+
+  # NAT Gateway for private subnet internet access
+  ClientNATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: ClientVPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  ClientNATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ClientNATGatewayEIP.AllocationId
+      SubnetId: !Ref ClientPublicSubnet1
+
+  # Route tables
+  ClientPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ClientVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-public-rt-${Environment}'
+
+  ClientPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ClientVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-private-rt-${Environment}'
+
+  ClientPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: ClientVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref ClientPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ClientInternetGateway
+
+  ClientPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ClientPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref ClientNATGateway
+
+  # Route table associations
+  ClientPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ClientPublicSubnet1
+      RouteTableId: !Ref ClientPublicRouteTable
+
+  ClientPublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ClientPublicSubnet2
+      RouteTableId: !Ref ClientPublicRouteTable
+
+  ClientPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ClientPrivateSubnet1
+      RouteTableId: !Ref ClientPrivateRouteTable
+
+  ClientPrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ClientPrivateSubnet2
+      RouteTableId: !Ref ClientPrivateRouteTable
+
+  # ============================================================================
+  # SECURITY GROUPS (Restrictive for Client Services)
+  # ============================================================================
+
+  ClientALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for client-facing Application Load Balancer'
+      VpcId: !Ref ClientVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: 'HTTPS from internet'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: 'HTTP redirect to HTTPS'
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationSecurityGroupId: !Ref ClientLambdaSecurityGroup
+          Description: 'HTTPS to Lambda functions'
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-alb-sg-${Environment}'
+
+  ClientLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for client Lambda functions'
+      VpcId: !Ref ClientVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ClientALBSecurityGroup
+          Description: 'HTTPS from ALB'
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: 'HTTPS to AWS services'
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref ClientDatabaseSecurityGroup
+          Description: 'PostgreSQL to client database'
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-lambda-sg-${Environment}'
+
+  ClientDatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for client database (isolated from internal systems)'
+      VpcId: !Ref ClientVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ClientLambdaSecurityGroup
+          Description: 'PostgreSQL from Lambda functions only'
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-db-sg-${Environment}'
+
+  # ============================================================================
+  # COGNITO USER POOL FOR CLIENT AUTHENTICATION
+  # ============================================================================
+
+  ClientUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'alhambra-client-pool-${Environment}'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 1
+      MfaConfiguration: 'OPTIONAL'
+      EnabledMfas:
+        - SMS_MFA
+      SmsConfiguration:
+        SnsCallerArn: !GetAtt CognitoSMSRole.Arn
+        ExternalId: !Sub 'alhambra-cognito-${Environment}'
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_phone_number
+            Priority: 1
+          - Name: verified_email
+            Priority: 2
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - phone_number
+          - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: phone_number
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: given_name
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: family_name
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: date_of_birth
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: account_status
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: client_type
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-pool-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  ClientUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref ClientUserPool
+      ClientName: !Sub 'alhambra-client-app-${Environment}'
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ADMIN_NO_SRP_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - https://portal.alhambrabank.com/auth/callback
+        - https://www.alhambrabank.com/auth/callback
+      LogoutURLs:
+        - https://portal.alhambrabank.com/auth/logout
+        - https://www.alhambrabank.com/auth/logout
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - phone
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # IAM role for Cognito SMS
+  CognitoSMSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'alhambra-cognito-sms-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cognito-idp.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Sub 'alhambra-cognito-${Environment}'
+      Policies:
+        - PolicyName: CognitoSMSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+
+  # ============================================================================
+  # CLIENT DATABASE (ISOLATED FROM INTERNAL SYSTEMS)
+  # ============================================================================
+
+  ClientDatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub 'alhambra-client-db-subnet-group-${Environment}'
+      DBSubnetGroupDescription: 'Subnet group for client database'
+      SubnetIds:
+        - !Ref ClientPrivateSubnet1
+        - !Ref ClientPrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-db-subnet-group-${Environment}'
+
+  ClientDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub 'alhambra-client-db-${Environment}'
+      DBInstanceClass: db.t3.small
+      Engine: postgres
+      EngineVersion: '14.9'
+      AllocatedStorage: 100
+      StorageType: gp2
+      StorageEncrypted: true
+      MasterUsername: client_admin
+      MasterUserPassword: !Ref ClientDatabasePassword
+      DBName: alhambra_client
+      DBSubnetGroupName: !Ref ClientDatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !Ref ClientDatabaseSecurityGroup
+      BackupRetentionPeriod: 30
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: true
+      PubliclyAccessible: false
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-db-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: 'Client data only - isolated from internal systems'
+
+  ClientDatabasePassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'alhambra-client-db-password-${Environment}'
+      Description: 'Password for client database'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "client_admin"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+
+  RDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # ============================================================================
+  # DYNAMODB TABLES FOR CLIENT DATA
+  # ============================================================================
+
+  # Client session management
+  ClientSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'alhambra-active-sessions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-active-sessions-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  ClientTempSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'alhambra-temp-sessions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-temp-sessions-${Environment}'
+
+  ClientOTPTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'alhambra-otp-codes-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: identifier
+          AttributeType: S
+      KeySchema:
+        - AttributeName: identifier
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-otp-codes-${Environment}'
+
+  ClientKYCTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'alhambra-kyc-data-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-kyc-data-${Environment}'
+        - Key: DataClassification
+          Value: 'Highly Sensitive'
+
+  # ============================================================================
+  # LAMBDA FUNCTIONS FOR CLIENT REQUESTS
+  # ============================================================================
+
+  ClientAuthLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'alhambra-client-auth-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ClientAuthLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminInitiateAuth
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminSetUserPassword
+                Resource: !GetAtt ClientUserPool.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ClientSessionsTable.Arn
+                  - !GetAtt ClientTempSessionsTable.Arn
+                  - !GetAtt ClientOTPTable.Arn
+                  - !GetAtt ClientKYCTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref ClientDatabasePassword
+
+  ClientPortfolioLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'alhambra-client-portfolio-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ClientPortfolioLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ClientSessionsTable.Arn
+                  - !Sub '${ClientSessionsTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                Resource: !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${ClientDatabase}'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref ClientDatabasePassword
+
+  # ============================================================================
+  # APPLICATION LOAD BALANCER FOR CLIENT SERVICES
+  # ============================================================================
+
+  ClientApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub 'alhambra-client-alb-${Environment}'
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ClientALBSecurityGroup
+      Subnets:
+        - !Ref ClientPublicSubnet1
+        - !Ref ClientPublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-alb-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  ClientALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'alhambra-client-tg-${Environment}'
+      TargetType: lambda
+      HealthCheckEnabled: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-tg-${Environment}'
+
+  ClientALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ClientApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2017-01
+      Certificates:
+        - CertificateArn: !Ref SSLCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ClientALBTargetGroup
+
+  # SSL Certificate (replace with your actual certificate ARN)
+  SSLCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: portal.alhambrabank.com
+      SubjectAlternativeNames:
+        - api.alhambrabank.com
+        - client.alhambrabank.com
+      ValidationMethod: DNS
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-ssl-${Environment}'
+
+  # ============================================================================
+  # NETWORK ACLs FOR ADDITIONAL SECURITY
+  # ============================================================================
+
+  ClientNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref ClientVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'alhambra-client-nacl-${Environment}'
+
+  # Allow HTTPS inbound
+  ClientNetworkAclEntryInboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref ClientNetworkAcl
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+
+  # Allow HTTP inbound (for redirect)
+  ClientNetworkAclEntryInboundHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref ClientNetworkAcl
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 80
+        To: 80
+
+  # Allow ephemeral ports inbound
+  ClientNetworkAclEntryInboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref ClientNetworkAcl
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # Allow all outbound
+  ClientNetworkAclEntryOutbound:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref ClientNetworkAcl
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+
+  # Associate Network ACL with subnets
+  ClientPublicSubnet1NetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref ClientPublicSubnet1
+      NetworkAclId: !Ref ClientNetworkAcl
+
+  ClientPublicSubnet2NetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref ClientPublicSubnet2
+      NetworkAclId: !Ref ClientNetworkAcl
+
+  ClientPrivateSubnet1NetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref ClientPrivateSubnet1
+      NetworkAclId: !Ref ClientNetworkAcl
+
+  ClientPrivateSubnet2NetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref ClientPrivateSubnet2
+      NetworkAclId: !Ref ClientNetworkAcl
+
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+
+Outputs:
+  ClientVPCId:
+    Description: 'Client VPC ID'
+    Value: !Ref ClientVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientVPC'
+
+  ClientUserPoolId:
+    Description: 'Cognito User Pool ID for client authentication'
+    Value: !Ref ClientUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientUserPool'
+
+  ClientUserPoolClientId:
+    Description: 'Cognito User Pool Client ID'
+    Value: !Ref ClientUserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientUserPoolClient'
+
+  ClientDatabaseEndpoint:
+    Description: 'Client database endpoint'
+    Value: !GetAtt ClientDatabase.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientDatabaseEndpoint'
+
+  ClientLoadBalancerDNS:
+    Description: 'Client Application Load Balancer DNS name'
+    Value: !GetAtt ClientApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientALBDNS'
+
+  ClientLoadBalancerArn:
+    Description: 'Client Application Load Balancer ARN'
+    Value: !Ref ClientApplicationLoadBalancer
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientALBArn'
+
+  SecurityNote:
+    Description: 'Security isolation status'
+    Value: 'Client infrastructure is completely isolated from internal portfolio tracker systems'

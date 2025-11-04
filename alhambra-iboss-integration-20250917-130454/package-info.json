@@ -1,0 +1,38 @@
+{
+  "name": "alhambra-iboss-integration",
+  "version": "1.0.0",
+  "description": "IBOSS Portfolio Tracker integration package for existing AWS infrastructure",
+  "account": "600043382145",
+  "user": "awm@awmga.com",
+  "created": "2025-09-17T13:04:54-04:00",
+  "integration_type": "existing_infrastructure",
+  "components": [
+    "iboss_backend_api",
+    "ai_portfolio_optimizer",
+    "enhanced_security_system",
+    "social_trading_platform",
+    "advanced_reporting_system",
+    "system_integration_optimizer",
+    "enhanced_market_data_service",
+    "mobile_responsive_portfolio"
+  ],
+  "aws_services": [
+    "ECS",
+    "EC2",
+    "RDS",
+    "ElastiCache",
+    "S3",
+    "CloudFront",
+    "Application Load Balancer",
+    "CloudWatch"
+  ],
+  "integration_options": [
+    "ecs_container",
+    "ec2_instance",
+    "serverless_lambda"
+  ],
+  "credentials": {
+    "iboss_username": "alhambrabank",
+    "admin_username": "admin"
+  }
+}

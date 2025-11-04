@@ -1,0 +1,76 @@
+# Alhambra Bank & Trust - Backend Dockerfile
+# AWS ECS Optimized with IBOSS Integration
+
+# Build stage
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY yarn.lock* ./
+
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Production stage
+FROM node:18-alpine AS production
+
+# Install security updates and required packages
+RUN apk update && apk upgrade && apk add --no-cache \
+    curl \
+    postgresql-client \
+    redis \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S appuser && \
+    adduser -S appuser -u 1001 -G appuser
+
+# Copy dependencies from builder stage
+COPY --from=builder /app/node_modules ./node_modules
+
+# Copy all IBOSS integration files
+COPY backend-api-integration.js ./
+COPY iboss_backend_api.js ./server.js
+COPY ai_portfolio_optimizer.js ./
+COPY enhanced_security_system.js ./
+COPY social_trading_platform.js ./
+COPY advanced_reporting_system.js ./
+COPY system_integration_optimizer.js ./
+COPY enhanced_market_data_service.js ./
+COPY database-init.sql ./
+COPY package*.json ./
+
+# Create application directories
+RUN mkdir -p uploads logs temp && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables for AWS
+ENV NODE_ENV=production
+ENV PORT=3001
+ENV AWS_REGION=us-east-1
+ENV AWS_ACCOUNT_ID=600043382145
+
+# Expose port for AWS ECS
+EXPOSE 3001
+
+# AWS ECS health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:3001/api/health || exit 1
+
+# Add container labels for AWS
+LABEL maintainer="Alhambra Bank & Trust <awm@awmga.com>"
+LABEL version="1.0.0"
+LABEL description="Alhambra Bank Backend with IBOSS Integration"
+LABEL aws.account="600043382145"
+LABEL environment="production"
+
+# Start the IBOSS-integrated backend
+CMD ["node", "server.js"]

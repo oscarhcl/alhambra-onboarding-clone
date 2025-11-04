@@ -1,0 +1,85 @@
+# Multi-stage build for Alhambra Bank & Trust Admin Dashboard
+FROM node:18-alpine AS base
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apk add --no-cache \
+    curl \
+    dumb-init \
+    && rm -rf /var/cache/apk/*
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S admin -u 1001
+
+# Frontend build stage
+FROM base AS frontend-builder
+
+# Copy frontend package files
+COPY package*.json ./
+COPY src/ ./src/
+COPY public/ ./public/
+
+# Install dependencies and build
+RUN npm ci --only=production && \
+    npm run build
+
+# Backend build stage
+FROM base AS backend-builder
+
+# Copy backend package files
+COPY server/package*.json ./server/
+WORKDIR /app/server
+
+# Install backend dependencies
+RUN npm ci --only=production
+
+# Production stage
+FROM base AS production
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV AWS_ACCOUNT_ID=600043382145
+
+# Copy built frontend
+COPY --from=frontend-builder --chown=admin:nodejs /app/build /app/public
+
+# Copy backend application
+COPY --from=backend-builder --chown=admin:nodejs /app/server /app/server
+
+# Copy additional configuration files
+COPY --chown=admin:nodejs server/app.js /app/server/
+COPY --chown=admin:nodejs .env.admin.template /app/.env.template
+
+# Create necessary directories
+RUN mkdir -p /app/uploads /app/logs && \
+    chown -R admin:nodejs /app/uploads /app/logs
+
+# Install health check utility
+RUN apk add --no-cache curl
+
+# Switch to non-root user
+USER admin
+
+# Expose port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:3000/api/health || exit 1
+
+# Set working directory for server
+WORKDIR /app/server
+
+# Start application with dumb-init
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "app.js"]
+
+# Labels for metadata
+LABEL maintainer="Alhambra Bank & Trust <admin@alhambra-bank.com>"
+LABEL version="1.0.0"
+LABEL description="Internal Admin Dashboard for Alhambra Bank & Trust"
+LABEL aws.account.id="600043382145"
